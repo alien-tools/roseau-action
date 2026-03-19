@@ -1,15 +1,61 @@
-name: "Roseau Action"
-description: "Custom action to execute a Roseau analysis between the last two commits."
-author: "Corentin Latappy <corentin.lat@gmail.com>"
+name: "Roseau"
+description: "Detect breaking changes between two versions of a Java library using Roseau"
+author: "alien-tools"
 branding:
-  icon: code
-  color: white
+  icon: shield
+  color: orange
 
 inputs:
-  report-artifact:
-    description: "Whether to upload the Roseau report and which format"
+  v1:
+    description: "Baseline version: Maven coordinates (g:a:v), local JAR, or source directory"
+    required: true
+  v2:
+    description: "Current version: Maven coordinates (g:a:v), local JAR, or source directory"
+    required: true
+  fail-on-bc:
+    description: "Fail the step if breaking changes are found"
     required: false
-    default: "none"
+    default: "true"
+  binary-only:
+    description: "Only report binary-breaking changes"
+    required: false
+    default: "false"
+  source-only:
+    description: "Only report source-breaking changes"
+    required: false
+    default: "false"
+  ignored:
+    description: "Path to a CSV file listing accepted breaking changes"
+    required: false
+  comment:
+    description: "Post/update a PR comment with the breaking changes report"
+    required: false
+    default: "true"
+  reports:
+    description: "Comma-separated FORMAT=PATH pairs for additional reports (e.g. HTML=report.html,CSV=report.csv)"
+    required: false
+  classpath:
+    description: "Extra classpath JARs (colon-separated)"
+    required: false
+  java-version:
+    description: "JDK version to set up"
+    required: false
+    default: "25"
+  roseau-version:
+    description: "Roseau release version (e.g. v0.6.0), or 'latest'"
+    required: false
+    default: "latest"
+
+outputs:
+  has-breaking-changes:
+    description: "'true' if breaking changes were detected, 'false' otherwise"
+    value: ${{ steps.analyze.outputs.has-breaking-changes }}
+  breaking-change-count:
+    description: "Number of breaking changes detected"
+    value: ${{ steps.analyze.outputs.breaking-change-count }}
+  report-path:
+    description: "Path to the generated JSON report"
+    value: ${{ steps.analyze.outputs.report-path }}
 
 runs:
   using: "composite"
@@ -17,39 +63,136 @@ runs:
     - name: Set up Java
       uses: actions/setup-java@v5
       with:
-        distribution: corretto
-        java-version: 21
+        distribution: temurin
+        java-version: ${{ inputs.java-version }}
 
-    - name: Checkout code
-      uses: actions/checkout@v5
-      with:
-        fetch-depth: 0
-
-    - name: Prepare both versions
+    - name: Download Roseau
+      id: download
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ROSEAU_VERSION: ${{ inputs.roseau-version }}
       run: |
-        mkdir versions
-        git worktree add versions/previous ${{ github.event.before }}
-        git worktree add versions/current ${{ github.sha }}
+        if [ "$ROSEAU_VERSION" = "latest" ]; then
+          TAG=$(gh release view --repo alien-tools/roseau --json tagName -q .tagName)
+        else
+          TAG="$ROSEAU_VERSION"
+        fi
+        echo "Installing Roseau $TAG"
+
+        ROSEAU_DIR="$RUNNER_TEMP/roseau"
+        mkdir -p "$ROSEAU_DIR"
+        gh release download "$TAG" --repo alien-tools/roseau --pattern 'roseau-*.jar' --dir "$ROSEAU_DIR" --clobber
+        JAR=$(ls "$ROSEAU_DIR"/roseau-*.jar | head -1)
+
+        echo "jar=$JAR" >> "$GITHUB_OUTPUT"
 
     - name: Run Roseau
+      id: analyze
       shell: bash
-      run: java -jar $GITHUB_ACTION_PATH/roseau.jar --diff --v1=versions/previous --v2=versions/current --github-action
+      env:
+        ROSEAU_JAR: ${{ steps.download.outputs.jar }}
+        INPUT_V1: ${{ inputs.v1 }}
+        INPUT_V2: ${{ inputs.v2 }}
+        INPUT_BINARY_ONLY: ${{ inputs.binary-only }}
+        INPUT_SOURCE_ONLY: ${{ inputs.source-only }}
+        INPUT_IGNORED: ${{ inputs.ignored }}
+        INPUT_CLASSPATH: ${{ inputs.classpath }}
+        INPUT_REPORTS: ${{ inputs.reports }}
+      run: |
+        REPORT_DIR="$RUNNER_TEMP/roseau-reports"
+        mkdir -p "$REPORT_DIR"
 
-    - name: Upload Roseau CSV Report
-      if: ${{ inputs.report-artifact == 'csv' }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: Roseau CSV Report
-        path: report.csv
+        # Build command
+        CMD=(java -jar "$ROSEAU_JAR" --diff --v1 "$INPUT_V1" --v2 "$INPUT_V2" --plain --fail-on-bc)
+        CMD+=(--report "JSON=$REPORT_DIR/report.json")
+        CMD+=(--report "MD=$REPORT_DIR/report.md")
 
-    - name: Upload Roseau HTML Report
-      if: ${{ inputs.report-artifact == 'html' }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: Roseau HTML Report
-        path: report.html
+        [ "$INPUT_BINARY_ONLY" = "true" ] && CMD+=(--binary-only)
+        [ "$INPUT_SOURCE_ONLY" = "true" ] && CMD+=(--source-only)
+        [ -n "$INPUT_IGNORED" ]           && CMD+=(--ignored "$INPUT_IGNORED")
+        [ -n "$INPUT_CLASSPATH" ]         && CMD+=(--classpath "$INPUT_CLASSPATH")
 
-    - name: Add summary
+        if [ -n "$INPUT_REPORTS" ]; then
+          IFS=',' read -ra EXTRA <<< "$INPUT_REPORTS"
+          for pair in "${EXTRA[@]}"; do
+            CMD+=(--report "$pair")
+          done
+        fi
+
+        # Run roseau; capture exit code without failing the step
+        echo "::group::Roseau output"
+        "${CMD[@]}" && EXIT_CODE=0 || EXIT_CODE=$?
+        echo "::endgroup::"
+
+        # Exit code 2 = roseau error, always fatal
+        if [ "$EXIT_CODE" -eq 2 ]; then
+          echo "::error::Roseau encountered an error"
+          exit 2
+        fi
+
+        # Parse results
+        HAS_BC=false
+        COUNT=0
+        if [ "$EXIT_CODE" -eq 1 ] && [ -f "$REPORT_DIR/report.json" ]; then
+          HAS_BC=true
+          COUNT=$(jq 'length' "$REPORT_DIR/report.json")
+        fi
+
+        echo "has-breaking-changes=$HAS_BC"  >> "$GITHUB_OUTPUT"
+        echo "breaking-change-count=$COUNT"   >> "$GITHUB_OUTPUT"
+        echo "report-path=$REPORT_DIR/report.json" >> "$GITHUB_OUTPUT"
+        echo "report-dir=$REPORT_DIR"         >> "$GITHUB_OUTPUT"
+
+    - name: Job summary
+      if: always() && steps.analyze.outputs.report-dir != ''
       shell: bash
-      run: cat report.md >> $GITHUB_STEP_SUMMARY
+      env:
+        REPORT_DIR: ${{ steps.analyze.outputs.report-dir }}
+      run: |
+        if [ -f "$REPORT_DIR/report.md" ]; then
+          cat "$REPORT_DIR/report.md" >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: PR comment
+      if: >-
+        always()
+        && inputs.comment == 'true'
+        && github.event_name == 'pull_request'
+        && steps.analyze.outputs.report-dir != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPORT_DIR: ${{ steps.analyze.outputs.report-dir }}
+        HAS_BC: ${{ steps.analyze.outputs.has-breaking-changes }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        MARKER="<!-- roseau-action -->"
+
+        if [ "$HAS_BC" = "true" ] && [ -f "$REPORT_DIR/report.md" ]; then
+          BODY="$MARKER"$'\n'"$(cat "$REPORT_DIR/report.md")"
+        else
+          BODY="$MARKER"$'\n'"### Roseau: no breaking changes detected"
+        fi
+
+        # Find existing comment to update in place
+        COMMENT_ID=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+          --jq "[.[] | select(.body | startswith(\"$MARKER\"))][0].id // empty")
+
+        if [ -n "$COMMENT_ID" ]; then
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments/$COMMENT_ID" \
+            -X PATCH -f body="$BODY"
+        else
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            -f body="$BODY"
+        fi
+
+    - name: Fail on breaking changes
+      if: >-
+        always()
+        && inputs.fail-on-bc == 'true'
+        && steps.analyze.outputs.has-breaking-changes == 'true'
+      shell: bash
+      run: |
+        echo "::error::Roseau detected ${{ steps.analyze.outputs.breaking-change-count }} breaking change(s)"
+        exit 1
