@@ -1,4 +1,4 @@
-name: "Roseau"
+name: "Roseau API Breaking Change Detection"
 description: "Detect breaking changes between two versions of a Java library using Roseau"
 author: "alien-tools"
 branding:
