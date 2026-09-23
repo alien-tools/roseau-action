@@ -8,32 +8,6 @@ trim() {
   printf '%s' "$value"
 }
 
-is_true() {
-  [[ "$1" == "true" ]]
-}
-
-resolve_one_into() {
-  # shellcheck disable=SC2034
-  local -n output="$1"
-  local preferred_name="$2"
-  local preferred_value="$3"
-  local legacy_name="$4"
-  local legacy_value="$5"
-
-  if [[ -n "$preferred_value" && -n "$legacy_value" ]]; then
-    echo "::error::Use either '$preferred_name' or '$legacy_name', not both"
-    exit 1
-  fi
-
-  if [[ -n "$preferred_value" ]]; then
-    # shellcheck disable=SC2034
-    output="$preferred_value"
-  else
-    # shellcheck disable=SC2034
-    output="$legacy_value"
-  fi
-}
-
 require_boolean() {
   local name="$1"
   local value="$2"
@@ -63,15 +37,8 @@ require_report_spec() {
   esac
 }
 
-require_boolean "fail-on-breaking-changes" "${INPUT_FAIL_ON_BREAKING_CHANGES:-}"
-require_boolean "fail-on-bc" "${INPUT_FAIL_ON_BC:-}"
-require_boolean "binary-only" "${INPUT_BINARY_ONLY:-false}"
-require_boolean "source-only" "${INPUT_SOURCE_ONLY:-false}"
-
-baseline=""
-current=""
-resolve_one_into baseline "baseline" "${INPUT_BASELINE:-}" "v1" "${INPUT_V1:-}"
-resolve_one_into current "current" "${INPUT_CURRENT:-}" "v2" "${INPUT_V2:-}"
+baseline="${INPUT_BASELINE:-}"
+current="${INPUT_CURRENT:-}"
 
 if [[ -z "$baseline" ]]; then
   echo "::error::Missing required input: baseline"
@@ -83,6 +50,9 @@ if [[ -z "$current" ]]; then
   exit 1
 fi
 
+fail_on_breaking_changes="${INPUT_FAIL_ON_BREAKING_CHANGES:-true}"
+require_boolean "fail-on-breaking-changes" "$fail_on_breaking_changes"
+
 compatibility="${INPUT_COMPATIBILITY:-all}"
 case "$compatibility" in
   all|binary|source) ;;
@@ -91,32 +61,6 @@ case "$compatibility" in
     exit 1
     ;;
 esac
-
-legacy_binary="${INPUT_BINARY_ONLY:-false}"
-legacy_source="${INPUT_SOURCE_ONLY:-false}"
-if is_true "$legacy_binary" && is_true "$legacy_source"; then
-  echo "::error::binary-only and source-only cannot both be true"
-  exit 1
-fi
-
-if [[ "$compatibility" != "all" && ( "$legacy_binary" == "true" || "$legacy_source" == "true" ) ]]; then
-  echo "::error::Use either compatibility or legacy binary-only/source-only inputs, not both"
-  exit 1
-fi
-
-if is_true "$legacy_binary"; then
-  compatibility="binary"
-elif is_true "$legacy_source"; then
-  compatibility="source"
-fi
-
-fail_on_breaking_changes="${INPUT_FAIL_ON_BREAKING_CHANGES:-}"
-if [[ -n "${INPUT_FAIL_ON_BC:-}" ]]; then
-  fail_on_breaking_changes="$INPUT_FAIL_ON_BC"
-fi
-if [[ -z "$fail_on_breaking_changes" ]]; then
-  fail_on_breaking_changes="true"
-fi
 
 report_dir="${INPUT_REPORT_DIR:-roseau-reports}"
 if [[ -z "$report_dir" ]]; then

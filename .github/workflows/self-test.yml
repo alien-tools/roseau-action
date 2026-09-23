@@ -1,0 +1,105 @@
+name: Self-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: shellcheck scripts/*.sh
+
+  no-breaking-changes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./
+        id: roseau
+        with:
+          baseline: org.apache.commons:commons-text:1.10.0
+          current: org.apache.commons:commons-text:1.11.0
+          reports: HTML=roseau-reports/report.html,CSV=roseau-reports/report.csv
+          comment: false
+
+      - name: Check outputs and reports
+        env:
+          HAS_BC: ${{ steps.roseau.outputs.has-breaking-changes }}
+          COUNT: ${{ steps.roseau.outputs.breaking-change-count }}
+          JSON_REPORT: ${{ steps.roseau.outputs.json-report }}
+          MD_REPORT: ${{ steps.roseau.outputs.markdown-report }}
+        run: |
+          set -x
+          [[ "$HAS_BC" == "false" ]]
+          [[ "$COUNT" == "0" ]]
+          [[ "$(jq 'length' "$JSON_REPORT")" == "0" ]]
+          test -s "$MD_REPORT"
+          test -s roseau-reports/report.html
+          test -s roseau-reports/report.csv
+
+  breaking-changes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./
+        id: report-only
+        with:
+          baseline: org.apache.commons:commons-lang3:3.0
+          current: org.apache.commons:commons-lang3:3.17.0
+          fail-on-breaking-changes: false
+          upload-reports: false
+          comment: false
+
+      - name: Check outputs
+        env:
+          HAS_BC: ${{ steps.report-only.outputs.has-breaking-changes }}
+          COUNT: ${{ steps.report-only.outputs.breaking-change-count }}
+          JSON_REPORT: ${{ steps.report-only.outputs.json-report }}
+        run: |
+          set -x
+          [[ "$HAS_BC" == "true" ]]
+          (( COUNT > 0 ))
+          [[ "$(jq 'length' "$JSON_REPORT")" == "$COUNT" ]]
+
+      - uses: ./
+        id: failing
+        continue-on-error: true
+        with:
+          baseline: org.apache.commons:commons-lang3:3.0
+          current: org.apache.commons:commons-lang3:3.17.0
+          report-dir: roseau-reports-failing
+          upload-reports: false
+          comment: false
+
+      - name: Check that breaking changes fail the step
+        env:
+          OUTCOME: ${{ steps.failing.outcome }}
+        run: '[[ "$OUTCOME" == "failure" ]]'
+
+  invalid-input:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./
+        id: invalid
+        continue-on-error: true
+        with:
+          baseline: org.apache.commons:commons-text:1.10.0
+          current: org.apache.commons:commons-text:1.11.0
+          compatibility: bogus
+          upload-reports: false
+          comment: false
+
+      - name: Check that invalid input fails the step
+        env:
+          OUTCOME: ${{ steps.invalid.outcome }}
+        run: '[[ "$OUTCOME" == "failure" ]]'

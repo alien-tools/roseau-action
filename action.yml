@@ -8,35 +8,18 @@ branding:
 inputs:
   baseline:
     description: "Baseline version: Maven coordinates (g:a:v), local JAR, or source directory"
-    required: false
+    required: true
   current:
     description: "Current version: Maven coordinates (g:a:v), local JAR, or source directory"
-    required: false
-  v1:
-    description: "Baseline version; legacy alias for baseline"
-    required: false
-  v2:
-    description: "Current version; legacy alias for current"
-    required: false
+    required: true
   fail-on-breaking-changes:
     description: "Fail the step if breaking changes are found"
     required: false
     default: "true"
-  fail-on-bc:
-    description: "Legacy alias for fail-on-breaking-changes"
-    required: false
   compatibility:
     description: "Compatibility mode to check: all, binary, or source"
     required: false
     default: "all"
-  binary-only:
-    description: "Legacy alias for compatibility=binary"
-    required: false
-    default: "false"
-  source-only:
-    description: "Legacy alias for compatibility=source"
-    required: false
-    default: "false"
   ignored:
     description: "Path to a CSV file listing accepted breaking changes"
     required: false
@@ -101,9 +84,6 @@ outputs:
   markdown-report:
     description: "Path to the generated Markdown report"
     value: ${{ steps.analyze.outputs.markdown-report }}
-  report-path:
-    description: "Legacy alias for json-report"
-    value: ${{ steps.analyze.outputs.json-report }}
 
 runs:
   using: "composite"
@@ -129,13 +109,8 @@ runs:
         ROSEAU_JAR: ${{ steps.download.outputs.jar }}
         INPUT_BASELINE: ${{ inputs.baseline }}
         INPUT_CURRENT: ${{ inputs.current }}
-        INPUT_V1: ${{ inputs.v1 }}
-        INPUT_V2: ${{ inputs.v2 }}
         INPUT_FAIL_ON_BREAKING_CHANGES: ${{ inputs.fail-on-breaking-changes }}
-        INPUT_FAIL_ON_BC: ${{ inputs.fail-on-bc }}
         INPUT_COMPATIBILITY: ${{ inputs.compatibility }}
-        INPUT_BINARY_ONLY: ${{ inputs.binary-only }}
-        INPUT_SOURCE_ONLY: ${{ inputs.source-only }}
         INPUT_IGNORED: ${{ inputs.ignored }}
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_CLASSPATH: ${{ inputs.classpath }}
