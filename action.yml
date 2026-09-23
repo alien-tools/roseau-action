@@ -7,8 +7,11 @@ branding:
 
 inputs:
   baseline:
-    description: "Baseline version: Maven coordinates (g:a:v), local JAR, or source directory"
-    required: true
+    description: "Baseline version: Maven coordinates (g:a:v), local JAR, or source directory. Defaults to current at baseline-ref"
+    required: false
+  baseline-ref:
+    description: "Git ref (tag, branch, or SHA) at which current is the baseline. Defaults to the PR base commit on pull_request events, and to the previous commit on push events"
+    required: false
   current:
     description: "Current version: Maven coordinates (g:a:v), local JAR, or source directory"
     required: true
@@ -36,7 +39,7 @@ inputs:
     description: "Extra classpath JARs for the current version"
     required: false
   pom:
-    description: "POM used to extract a shared classpath"
+    description: "POM used to extract a shared classpath; read from each version when comparing with a git ref"
     required: false
   v1-pom:
     description: "POM used to extract the baseline classpath"
@@ -59,6 +62,14 @@ inputs:
     description: "Post/update a PR comment with the breaking changes report"
     required: false
     default: "true"
+  inline-comments:
+    description: "Comment each breaking change on the lines of the PR diff; requires comment"
+    required: false
+    default: "true"
+  annotations:
+    description: "Annotate breaking changes on the lines of the PR diff: auto (only those without an inline comment), true, or false"
+    required: false
+    default: "auto"
   java-version:
     description: "JDK version to set up"
     required: false
@@ -108,6 +119,10 @@ runs:
       env:
         ROSEAU_JAR: ${{ steps.download.outputs.jar }}
         INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_BASELINE_REF: ${{ inputs.baseline-ref }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
         INPUT_CURRENT: ${{ inputs.current }}
         INPUT_FAIL_ON_BREAKING_CHANGES: ${{ inputs.fail-on-breaking-changes }}
         INPUT_COMPATIBILITY: ${{ inputs.compatibility }}
@@ -128,11 +143,32 @@ runs:
         always()
         && inputs.upload-reports == 'true'
         && steps.analyze.outputs.report-dir != ''
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: roseau-reports
         path: ${{ steps.analyze.outputs.report-dir }}
         if-no-files-found: error
+
+    - name: Annotate breaking changes
+      if: >-
+        always()
+        && github.event_name == 'pull_request'
+        && steps.analyze.outputs.report-dir != ''
+        && (inputs.annotations != 'false' || (inputs.comment == 'true' && inputs.inline-comments == 'true'))
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        JSON_REPORT: ${{ steps.analyze.outputs.json-report }}
+        REPORT_DIR: ${{ steps.analyze.outputs.report-dir }}
+        LEVEL: ${{ steps.analyze.outputs.fail-on-breaking-changes == 'true' && 'error' || 'warning' }}
+        ANNOTATIONS: ${{ inputs.annotations }}
+        INLINE_COMMENTS: ${{ inputs.comment == 'true' && inputs.inline-comments == 'true' && '--inline-comments' || '--no-inline-comments' }}
+      run: >-
+        python3 "$GITHUB_ACTION_PATH/scripts/annotate.py"
+        --report "$JSON_REPORT" --summary "$REPORT_DIR/inline.md" --level "$LEVEL"
+        --annotations "$ANNOTATIONS" "$INLINE_COMMENTS"
 
     - name: Job summary
       if: always() && steps.analyze.outputs.report-dir != ''

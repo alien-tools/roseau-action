@@ -10,11 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  shellcheck:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - run: shellcheck scripts/*.sh
+      - run: python3 -m unittest discover -s tests -v
 
   no-breaking-changes:
     runs-on: ubuntu-latest
@@ -103,3 +104,68 @@ jobs:
         env:
           OUTCOME: ${{ steps.invalid.outcome }}
         run: '[[ "$OUTCOME" == "failure" ]]'
+
+  jar-files:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download JARs
+        run: |
+          base=https://repo1.maven.org/maven2/org/apache/commons/commons-lang3
+          curl -sSfLo old.jar "$base/3.0/commons-lang3-3.0.jar"
+          curl -sSfLo new.jar "$base/3.17.0/commons-lang3-3.17.0.jar"
+
+      - uses: ./
+        id: roseau
+        with:
+          baseline: old.jar
+          current: new.jar
+          compatibility: binary
+          fail-on-breaking-changes: false
+          upload-reports: false
+          comment: false
+
+      - name: Check outputs
+        env:
+          HAS_BC: ${{ steps.roseau.outputs.has-breaking-changes }}
+          JSON_REPORT: ${{ steps.roseau.outputs.json-report }}
+        run: |
+          set -x
+          [[ "$HAS_BC" == "true" ]]
+          [[ "$(jq 'all(.binaryBreaking)' "$JSON_REPORT")" == "true" ]]
+
+  baseline-ref:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create a library repository with a v1 tag
+        run: |
+          git config --global user.name ci && git config --global user.email ci@example.com
+          git init -q --bare "$RUNNER_TEMP/origin.git"
+          git -C "$RUNNER_TEMP/origin.git" config uploadpack.allowAnySHA1InWant true
+          git clone -q "$RUNNER_TEMP/origin.git" lib
+          mkdir -p lib/src/main/java/p
+          printf 'package p;\n\npublic class A {\n\tpublic void m() {}\n}\n' > lib/src/main/java/p/A.java
+          git -C lib add -A && git -C lib commit -qm v1 && git -C lib tag v1
+          printf 'package p;\n\npublic class A {\n}\n' > lib/src/main/java/p/A.java
+          git -C lib commit -qam v2 && git -C lib push -q origin HEAD v1
+
+      - uses: ./
+        id: roseau
+        with:
+          baseline-ref: v1
+          current: lib/src/main/java
+          fail-on-breaking-changes: false
+          upload-reports: false
+          comment: false
+
+      - name: Check outputs
+        env:
+          COUNT: ${{ steps.roseau.outputs.breaking-change-count }}
+          REPORT_DIR: ${{ steps.roseau.outputs.report-dir }}
+        run: |
+          set -x
+          [[ "$COUNT" == "1" ]]
+          grep -q 'Baseline:\*\* `v1`' "$REPORT_DIR/comparison.md"
