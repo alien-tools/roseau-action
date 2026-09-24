@@ -9,7 +9,7 @@ else
   tag="$roseau_version"
 fi
 
-echo "Installing Roseau $tag"
+echo "Downloading Roseau $tag"
 
 version="${tag#v}"
 if [[ -n "$version" && "$version" != "$tag" ]]; then
@@ -22,7 +22,7 @@ roseau_dir="$RUNNER_TEMP/roseau"
 mkdir -p "$roseau_dir"
 
 if ! gh release download "$tag" --repo alien-tools/roseau --pattern "$pattern" --dir "$roseau_dir" --clobber; then
-  echo "::error::Could not download Roseau release asset matching '$pattern' from tag '$tag'"
+  echo "::error::Could not download Roseau release matching '$pattern' from tag '$tag'"
   exit 1
 fi
 

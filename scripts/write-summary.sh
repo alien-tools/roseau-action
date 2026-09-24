@@ -5,7 +5,7 @@ markdown_report="$REPORT_DIR/report.md"
 comparison="$REPORT_DIR/comparison.md"
 
 {
-  echo "### Roseau"
+  echo "### Roseau report"
   echo
   [[ -s "$comparison" ]] && { cat "$comparison"; echo; }
   if [[ -s "$markdown_report" ]]; then

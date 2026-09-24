@@ -192,12 +192,17 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: bash "$GITHUB_ACTION_PATH/scripts/comment-pr.sh"
 
-    - name: Fail on breaking changes
-      if: >-
-        always()
-        && steps.analyze.outputs.fail-on-breaking-changes == 'true'
-        && steps.analyze.outputs.has-breaking-changes == 'true'
+    - name: Report breaking changes
+      if: always() && steps.analyze.outputs.has-breaking-changes == 'true'
       shell: bash
+      env:
+        COUNT: ${{ steps.analyze.outputs.breaking-change-count }}
+        BASELINE: ${{ steps.analyze.outputs.baseline-description }}
+        FAIL: ${{ steps.analyze.outputs.fail-on-breaking-changes }}
       run: |
-        echo "::error::Roseau detected ${{ steps.analyze.outputs.breaking-change-count }} breaking change(s)"
-        exit 1
+        message="Roseau detected $COUNT breaking change(s) since $BASELINE"
+        if [[ "$FAIL" == "true" ]]; then
+          echo "::error title=Breaking changes::$message"
+          exit 1
+        fi
+        echo "::warning title=Breaking changes::$message"

@@ -156,6 +156,8 @@ Artifact names must be unique within a workflow run. If you use the action more 
 
 ## Report-only mode
 
+With `fail-on-breaking-changes: false`, the step succeeds even when breaking changes are found. It then emits a warning, such as "Roseau detected 3 breaking change(s) since the previous commit (1a2b3c4)", shown on the workflow run and in the PR checks. Use the outputs to act on the result:
+
 ```yaml
 - uses: alien-tools/roseau-action@v2
   id: roseau
