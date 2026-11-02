@@ -135,37 +135,82 @@ jobs:
           [[ "$HAS_BC" == "true" ]]
           [[ "$(jq 'all(.binaryBreaking)' "$JSON_REPORT")" == "true" ]]
 
-  baseline-ref:
+  # Runs the script directly, to simulate pull_request and push events in a library repository
+  git-refs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Create a library repository with a v1 tag
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Download Roseau
+        id: download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROSEAU_VERSION: v0.7.0
+        run: bash scripts/download-roseau.sh
+
+      # v1 has c() at line 10. The pull request removes it; meanwhile, main moves it to line 12 and removes d().
+      - name: Create a library repository
+        id: lib
         run: |
           git config --global user.name ci && git config --global user.email ci@example.com
           git init -q --bare "$RUNNER_TEMP/origin.git"
-          git -C "$RUNNER_TEMP/origin.git" config uploadpack.allowAnySHA1InWant true
-          git clone -q "$RUNNER_TEMP/origin.git" lib
-          mkdir -p lib/src/main/java/p
-          printf 'package p;\n\npublic class A {\n\tpublic void m() {}\n}\n' > lib/src/main/java/p/A.java
-          git -C lib add -A && git -C lib commit -qm v1 && git -C lib tag v1
-          printf 'package p;\n\npublic class A {\n}\n' > lib/src/main/java/p/A.java
-          git -C lib commit -qam v2 && git -C lib push -q origin HEAD v1
+          git clone -q "$RUNNER_TEMP/origin.git" lib && cd lib
+          mkdir -p src/main/java/p
+          printf 'package p;\n\npublic class A {\n\tpublic void a() {}\n\n\tpublic void d() {}\n\n\tpublic void e() {}\n\n\tpublic void c() {}\n\n\tpublic void f() {}\n}\n' > src/main/java/p/A.java
+          git add -A && git commit -qm v1 && git tag v1
+          git checkout -qb feature && sed -i '/void c()/,+1d' src/main/java/p/A.java && git commit -qam "Remove c()"
+          git checkout -q - && sed -i 's/^public class A {$/&\n\tpublic void x() {}\n\n\tpublic void y() {}\n/; /void d()/,+1d' src/main/java/p/A.java
+          git commit -qam "Add x() and y(), remove d()" && git push -q origin HEAD feature v1
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "head=$(git rev-parse feature)" >> "$GITHUB_OUTPUT"
 
-      - uses: ./
-        id: roseau
-        with:
-          baseline-ref: v1
-          current: lib/src/main/java
-          fail-on-breaking-changes: false
-          upload-reports: false
-          comment: false
-
-      - name: Check outputs
+      - name: Compare a branch with a tag
+        id: branch
         env:
-          COUNT: ${{ steps.roseau.outputs.breaking-change-count }}
-          REPORT_DIR: ${{ steps.roseau.outputs.report-dir }}
+          ROSEAU_JAR: ${{ steps.download.outputs.jar }}
+          EVENT_NAME: push
+          INPUT_BASELINE_REF: v1
+          INPUT_CURRENT: lib/src/main/java
+          INPUT_REPORT_DIR: branch-reports
+        run: bash scripts/run-roseau.sh
+
+      - name: Check that the branch is compared with the tag
+        env:
+          JSON_REPORT: ${{ steps.branch.outputs.json-report }}
+          REPORT_DIR: ${{ steps.branch.outputs.report-dir }}
         run: |
           set -x
-          [[ "$COUNT" == "1" ]]
+          [[ "$(jq -c 'map(.impactedSymbol)' "$JSON_REPORT")" == '["p.A.d()"]' ]]
           grep -q 'Baseline:\*\* `v1`' "$REPORT_DIR/comparison.md"
+
+      # actions/checkout checks out the merge commit of the pull request
+      - name: Compare a pull request whose base branch moved on
+        id: pr
+        env:
+          ROSEAU_JAR: ${{ steps.download.outputs.jar }}
+          EVENT_NAME: pull_request
+          PR_BASE_SHA: ${{ steps.lib.outputs.base }}
+          PR_HEAD_SHA: ${{ steps.lib.outputs.head }}
+          INPUT_BASELINE_REF: v1
+          INPUT_CURRENT: lib/src/main/java
+          INPUT_REPORT_DIR: pr-reports
+        run: |
+          set -o pipefail
+          git -C lib merge -q --no-edit feature
+          bash scripts/run-roseau.sh | tee pr.log
+
+      - name: Check that the head is compared with the merge base
+        env:
+          JSON_REPORT: ${{ steps.pr.outputs.json-report }}
+          REPORT_DIR: ${{ steps.pr.outputs.report-dir }}
+        run: |
+          set -x
+          [[ "$(jq -c 'map([.impactedSymbol, .location.line])' "$JSON_REPORT")" == '[["p.A.c()",10]]' ]]
+          grep -q 'the merge base of this pull request' "$REPORT_DIR/comparison.md"
+          grep -q "::notice::Pull requests are compared with their merge base" pr.log
+          [[ "$(git -C lib rev-parse --is-shallow-repository)" == false ]]

@@ -46,41 +46,110 @@ relative_path() {
   python3 -c 'import os, sys; print(os.path.relpath(os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])))' "$1" "$2"
 }
 
-# Checks out $current as it is at a git ref, in a worktree, and points $baseline at it
-checkout_baseline() {
-  local ref="$1" current_dir root sha
-  [[ "$current" != *.jar ]] || error "A JAR cannot be compared with a git ref; set baseline to Maven coordinates or a JAR instead"
-  [[ -e "$current" ]] || error "current must be a path of the repository to be compared with a git ref: '$current' does not exist"
-
-  current_dir="$current"
+# Finds the repository of $current, and the path of $current in it
+locate_current() {
+  local current_dir="$current"
   [[ -d "$current_dir" ]] || current_dir="$(dirname "$current")"
-  root="$(git -C "$current_dir" rev-parse --show-toplevel 2>/dev/null)" \
-    || error "'$current' is not in a git repository; check it out with actions/checkout first"
+  root="$(git -C "$current_dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  current_path="$(relative_path "$current" "$root")"
+}
 
-  echo "Fetching baseline $ref"
-  git -C "$root" fetch --quiet --no-tags --depth=1 origin "$ref" \
-    || error "Could not fetch baseline ref '$ref' from origin"
-  sha="$(git -C "$root" rev-parse FETCH_HEAD)"
-  worktree="$RUNNER_TEMP/roseau-baseline"
+# Prints the SHA of a commit or ref of origin, and fetches it unless it is already there.
+# Only fetches one commit in shallow clones, so that full clones keep their history.
+fetch_commit() {
+  local ref="$1" fetch=(fetch --quiet --no-tags)
+  if [[ "$ref" =~ ^[0-9a-f]{40}$ ]] && git -C "$root" cat-file -e "$ref^{commit}" 2>/dev/null; then
+    echo "$ref"
+    return
+  fi
+  [[ "$(git -C "$root" rev-parse --is-shallow-repository)" == true ]] && fetch+=(--depth=1)
+  git -C "$root" "${fetch[@]}" origin "$ref" || return 1
+  git -C "$root" rev-parse FETCH_HEAD
+}
+
+# Prints the merge base of two commits: with git in full clones, or else with the GitHub API
+merge_base() {
+  if [[ "$(git -C "$root" rev-parse --is-shallow-repository)" == false ]] \
+    && git -C "$root" merge-base "$1" "$2" 2>/dev/null; then
+    return
+  fi
+  [[ -n "${GITHUB_REPOSITORY:-}" ]] \
+    && gh api "repos/$GITHUB_REPOSITORY/compare/$1...$2" --jq .merge_base_commit.sha 2>/dev/null
+}
+
+add_worktree() {
+  local sha="$1" worktree="$2"
   git -C "$root" worktree remove --force "$worktree" 2>/dev/null || rm -rf "$worktree"
   git -C "$root" worktree add --quiet --detach "$worktree" "$sha"
+}
 
-  baseline="$worktree/$(relative_path "$current" "$root")"
-  [[ -e "$baseline" ]] || error "'$current' does not exist at baseline ref '$ref' ($sha)"
+# Prints the path of a repository file in a worktree, or the file itself if the worktree does not have it
+in_worktree() {
+  local path="$1" worktree="$2"
+  if [[ -n "$worktree" && -e "$worktree/$(relative_path "$path" "$root")" ]]; then
+    echo "$worktree/$(relative_path "$path" "$root")"
+  else
+    echo "$path"
+  fi
+}
+
+# Checks out $current as it is at the head of the pull request, in a worktree, and points $current at it
+checkout_head() {
+  local sha
+  echo "Fetching the head of this pull request $PR_HEAD_SHA"
+  sha="$(fetch_commit "$PR_HEAD_SHA")" || error "Could not fetch the head of this pull request ($PR_HEAD_SHA) from origin"
+  current_worktree="$RUNNER_TEMP/roseau-current"
+  add_worktree "$sha" "$current_worktree"
+  current="$current_worktree/$current_path"
+  [[ -e "$current" ]] || error "'$INPUT_CURRENT' does not exist at the head of this pull request ($sha)"
+  current_label="\`$INPUT_CURRENT\` at the head of this pull request (\`${sha:0:7}\`)"
+}
+
+# Checks out $current as it is at a git ref, in a worktree, and points $baseline at it
+checkout_baseline() {
+  local ref="$1" sha worktree
+  [[ "$current" != *.jar ]] || error "A JAR cannot be compared with a git ref; set baseline to Maven coordinates or a JAR instead"
+  [[ -e "$current" ]] || error "current must be a path of the repository to be compared with a git ref: '$current' does not exist"
+  [[ -n "$root" ]] || error "'$current' is not in a git repository; check it out with actions/checkout first"
+
+  echo "Fetching baseline $ref"
+  sha="$(fetch_commit "$ref")" || error "Could not fetch baseline ref '$ref' from origin"
+  worktree="$RUNNER_TEMP/roseau-baseline"
+  add_worktree "$sha" "$worktree"
+
+  baseline="$worktree/$current_path"
+  [[ -e "$baseline" ]] || error "'$INPUT_CURRENT' does not exist at baseline ref '$ref' ($sha)"
 
   # Each version is built with its own pom.xml
   if [[ -n "${INPUT_POM:-}" && -z "${INPUT_V1_POM:-}${INPUT_V2_POM:-}" ]]; then
-    v2_pom="$INPUT_POM"
-    v1_pom="$worktree/$(relative_path "$INPUT_POM" "$root")"
-    [[ -f "$v1_pom" ]] || v1_pom="$INPUT_POM"
+    v1_pom="$(in_worktree "$INPUT_POM" "$worktree")"
+    v2_pom="$(in_worktree "$INPUT_POM" "$current_worktree")"
     pom=""
   fi
   baseline_label="$2 (\`${sha:0:7}\`)"
 }
 
+# Compares the head of the pull request with its merge base, as in its "Files changed" tab
+compare_pull_request() {
+  local merge_base_sha
+  if [[ -n "$baseline$baseline_ref" ]]; then
+    echo "::notice::Pull requests are compared with their merge base; 'baseline' and 'baseline-ref' only apply to other events"
+  fi
+  if merge_base_sha="$(merge_base "$PR_BASE_SHA" "$PR_HEAD_SHA")" && [[ "$merge_base_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    checkout_head
+    checkout_baseline "$merge_base_sha" "the merge base of this pull request"
+  else
+    echo "::warning::Could not find the merge base of this pull request; comparing the merge commit with the base commit instead, so breaking changes may not be marked on the right lines of the diff"
+    checkout_baseline "$PR_BASE_SHA" "the base of this pull request"
+  fi
+}
+
 baseline="${INPUT_BASELINE:-}"
 baseline_ref="${INPUT_BASELINE_REF:-}"
 current="${INPUT_CURRENT:-}"
+current_label="\`$current\`"
+current_worktree=""
+root=""
 pom="${INPUT_POM:-}"
 v1_pom="${INPUT_V1_POM:-}"
 v2_pom="${INPUT_V2_POM:-}"
@@ -88,14 +157,21 @@ v2_pom="${INPUT_V2_POM:-}"
 [[ -n "$current" ]] || error "Missing required input: current"
 [[ -z "$baseline" || -z "$baseline_ref" ]] || error "Use either 'baseline' or 'baseline-ref', not both"
 
-if [[ -n "$baseline_ref" ]]; then
+[[ "$current" != *.jar && -e "$current" ]] && locate_current || true
+
+# Pull requests define their own baseline: sources tracked by git are compared at the merge base and at the head of
+# the pull request. Other versions, such as JARs or generated sources, are compared with the given baseline.
+if [[ "${EVENT_NAME:-}" == pull_request && -n "$root" ]] \
+  && git -C "$root" ls-files --error-unmatch -- "$current_path" > /dev/null 2>&1; then
+  compare_pull_request
+elif [[ -n "$baseline_ref" ]]; then
   checkout_baseline "$baseline_ref" "\`$baseline_ref\`"
 elif [[ -n "$baseline" ]]; then
   baseline_label="\`$baseline\`"
 else
   case "${EVENT_NAME:-}" in
     pull_request)
-      checkout_baseline "$PR_BASE_SHA" "the base of this pull request"
+      error "'$INPUT_CURRENT' is not a source directory tracked by git, so it cannot be compared with the merge base of this pull request; set 'baseline'"
       ;;
     push)
       [[ -n "${PUSH_BEFORE:-}" && "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]] \
@@ -125,7 +201,7 @@ if [[ -z "$report_dir" ]]; then
   report_dir="roseau-reports"
 fi
 mkdir -p "$report_dir"
-echo "**Baseline:** $baseline_label · **Current:** \`$current\`" > "$report_dir/comparison.md"
+echo "**Baseline:** $baseline_label · **Current:** $current_label" > "$report_dir/comparison.md"
 
 json_report="$report_dir/report.json"
 markdown_report="$report_dir/report.md"

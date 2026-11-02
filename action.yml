@@ -10,7 +10,7 @@ inputs:
     description: "Baseline version: Maven coordinates (g:a:v), local JAR, or source directory. Defaults to current at baseline-ref"
     required: false
   baseline-ref:
-    description: "Git ref (tag, branch, or SHA) at which current is the baseline. Defaults to the PR base commit on pull_request events, and to the previous commit on push events"
+    description: "Git ref (tag, branch, or SHA) at which current is the baseline. Defaults to the previous commit on push events. Pull requests always use their merge base"
     required: false
   current:
     description: "Current version: Maven coordinates (g:a:v), local JAR, or source directory"
@@ -117,11 +117,13 @@ runs:
       id: analyze
       shell: bash
       env:
+        GH_TOKEN: ${{ github.token }}
         ROSEAU_JAR: ${{ steps.download.outputs.jar }}
         INPUT_BASELINE: ${{ inputs.baseline }}
         INPUT_BASELINE_REF: ${{ inputs.baseline-ref }}
         EVENT_NAME: ${{ github.event_name }}
         PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         PUSH_BEFORE: ${{ github.event.before }}
         INPUT_CURRENT: ${{ inputs.current }}
         INPUT_FAIL_ON_BREAKING_CHANGES: ${{ inputs.fail-on-breaking-changes }}
