@@ -67,6 +67,8 @@ To compare against something else, set one of:
       baseline: com.example:my-lib:1.2.0
   ```
 
+  To always compare against the latest published version, use the version `RELEASE`, such as `com.example:my-lib:RELEASE`.
+
 To use different baselines for pull requests and pushes, use an expression. For instance, to check pull requests against their base branch, and `main` against the last release, without failing on `main`:
 
 ```yaml
